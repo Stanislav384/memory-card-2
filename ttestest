@@ -1,0 +1,1409 @@
+// ============================================================================
+// HDRPRainyNightAtmosphereTool.cs
+// Инструмент (Editor Window + Runtime Controller + Presets) для создания
+// атмосферы ночного дождя, густого объемного тумана, красивой Луны и
+// постобработки в Unity 6 (6000.x / 6.6 LTS) High Definition Render Pipeline (HDRP 17.x).
+//
+// Официальная документация Unity HDRP 17.x API, используемая в скрипте:
+// - Fog Volume Override: https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.0/api/UnityEngine.Rendering.HighDefinition.Fog.html
+// - PhysicallyBasedSky: https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.7/api/UnityEngine.Rendering.HighDefinition.PhysicallyBasedSky.html
+// - VolumetricClouds: https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.6/manual/create-realistic-clouds-volumetric-clouds.html
+// - HDAdditionalLightData: https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.0/api/UnityEngine.Rendering.HighDefinition.HDAdditionalLightData.html
+// - CelestialBodyShadingSource: https://docs.unity3d.com/Packages/com.unity.render-pipelines.high-definition@17.7/api/UnityEngine.Rendering.HighDefinition.HDAdditionalLightData.CelestialBodyShadingSource.html
+// ============================================================================
+
+using System;
+using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.HighDefinition;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+namespace HDRPAtmosphereTools
+{
+    /// <summary>
+    /// Пресеты графики и атмосферы для быстрого переключения в окне инструмента или в рантайме.
+    /// </summary>
+    public enum AtmospherePresetType
+    {
+        Custom = 0,
+        LightRainThickFogNight = 1,   // Основной: неглубокая ночь, густой туман, легкий дождь, красивая Луна
+        HeavyMistGiantMoon = 2,       // Мистический: очень густой туман, крупная Луна, мелкая морось
+        StormyOvercastNight = 3,      // Дождливый: плотные тучи, умеренный дождь, контрастный свет
+        PerformanceNight = 4          // Оптимизированный: сниженная нагрузка на волюметрики для высокого FPS
+    }
+
+    /// <summary>
+    /// Уровень качества рендеринга волюметриков и эффектов постобработки.
+    /// </summary>
+    public enum GraphicsQualityTier
+    {
+        Low = 0,
+        Medium = 1,
+        High = 2,
+        Ultra = 3
+    }
+
+    /// <summary>
+    /// Сериализуемая структура со всеми параметрами неба, Луны, тумана, дождя и постобработки.
+    /// Можно сохранять в пресеты ScriptableObject или менять в реальном времени.
+    /// </summary>
+    [Serializable]
+    public class RainyNightSettings
+    {
+        [Header("Общий пресет и качество")]
+        public AtmospherePresetType presetType = AtmospherePresetType.LightRainThickFogNight;
+        public GraphicsQualityTier qualityTier = GraphicsQualityTier.High;
+
+        [Header("1. Ночь и Луна (Directional Light + Celestial Body)")]
+        [Tooltip("Угол высоты Луны над горизонтом (в градусах). 25-35 градусов дают красивые длинные тени и видимость Луны в кадре.")]
+        [Range(5f, 85f)] public float moonElevation = 28f;
+
+        [Tooltip("Азимут (поворот по горизонтали) Луны в градусах.")]
+        [Range(0f, 360f)] public float moonAzimuth = 145f;
+
+        [Tooltip("Освещенность Луны в Люксах (Lux). Для 'не глубокой ночи' рекомендуется 2.0 - 4.5 Lux в сочетании с экспозицией 4.8 - 5.5.")]
+        [Range(0.2f, 12f)] public float moonIntensityLux = 3.2f;
+
+        [Tooltip("Цветовая температура лунного света (Кельвины). 4300-5200K в сочетании с холодным фильтром дают серебристо-голубой свет.")]
+        [Range(3000f, 9000f)] public float moonColorTemperature = 4800f;
+
+        [Tooltip("Оттенок света Луны.")]
+        public Color moonLightColor = new Color(0.72f, 0.85f, 1.0f, 1.0f);
+
+        [Tooltip("Угловой диаметр диска Луны в небе (в градусах). Реальный размер ~0.53°, но 2.2° - 3.5° дают выразительную красивую Луну.")]
+        [Range(0.5f, 8.0f)] public float moonAngularDiameter = 2.8f;
+
+        [Tooltip("Цвет поверхности диска Луны.")]
+        public Color moonSurfaceTint = new Color(0.92f, 0.96f, 1.0f, 1.0f);
+
+        [Tooltip("Размер ореола (Flare Size) вокруг Луны в градусах.")]
+        [Range(0f, 45f)] public float moonFlareSize = 16.0f;
+
+        [Tooltip("Затухание ореола (Flare Falloff) вокруг Луны.")]
+        [Range(1f, 30f)] public float moonFlareFalloff = 4.5f;
+
+        [Tooltip("Интенсивность свечения ореола вокруг Луны.")]
+        [Range(0f, 1f)] public float moonFlareMultiplier = 0.65f;
+
+        [Tooltip("Цвет ореола вокруг Луны.")]
+        public Color moonFlareTint = new Color(0.48f, 0.68f, 1.0f, 1.0f);
+
+        [Tooltip("Множитель объемного света от Луны в тумане (Volumetric Dimmer).")]
+        [Range(0f, 8f)] public float moonVolumetricDimmer = 2.4f;
+
+        [Tooltip("Использовать режим отражения солнечного света (фаза Луны) вместо прямого свечения диска.")]
+        public bool useMoonPhaseReflection = false;
+
+        [Tooltip("Фаза Луны (при включенном режиме отражения): 1.0 — полнолуние, 0.5 — полумесяц.")]
+        [Range(0f, 1f)] public float moonPhase = 0.88f;
+
+        [Tooltip("Пепельный свет Земли на темной стороне Луны (Earthshine).")]
+        [Range(0f, 1f)] public float moonEarthshine = 0.15f;
+
+        [Header("2. Дождливое ночное небо и облака (Physically Based Sky + Volumetric Clouds)")]
+        [Tooltip("Плотность аэрозолей в атмосфере (создает атмосферную дымку у горизонта и рассеивает лунный свет).")]
+        [Range(0f, 1f)] public float skyAerosolDensity = 0.35f;
+
+        [Tooltip("Оттенок зенита ночного неба (чтобы ночь не была угольно-черной).")]
+        public Color skyZenithTint = new Color(0.10f, 0.16f, 0.28f, 1.0f);
+
+        [Tooltip("Оттенок горизонта ночного неба.")]
+        public Color skyHorizonTint = new Color(0.18f, 0.25f, 0.36f, 1.0f);
+
+        [Tooltip("Множитель яркости звездного неба (Space Emission). В дождливую погоду звезды слегка приглушены тучами.")]
+        [Range(0f, 5f)] public float starfieldMultiplier = 0.35f;
+
+        [Tooltip("Включить объемные дождливые облака (Volumetric Clouds).")]
+        public bool enableVolumetricClouds = true;
+
+        [Tooltip("Множитель плотности облаков (Density Multiplier). Значения 0.55 - 0.75 создают плотные тучи с просветами для Луны.")]
+        [Range(0f, 1f)] public float cloudDensityMultiplier = 0.68f;
+
+        [Tooltip("Фактор формы облаков (Shape Factor). Меньше значение = больше покрытие неба тучами (0.55 - 0.72 оптимально для просветов Луны).")]
+        [Range(0f, 1f)] public float cloudShapeFactor = 0.64f;
+
+        [Tooltip("Масштаб крупных облачных масс (Shape Scale).")]
+        [Range(0.5f, 10f)] public float cloudShapeScale = 3.2f;
+
+        [Tooltip("Детализация краев облаков (Erosion Factor).")]
+        [Range(0f, 1f)] public float cloudErosionFactor = 0.75f;
+
+        [Tooltip("Нижняя граница дождевых облаков (в метрах).")]
+        [Range(500f, 4000f)] public float cloudBottomAltitude = 1100f;
+
+        [Tooltip("Толщина слоя дождевых облаков (в метрах).")]
+        [Range(500f, 8000f)] public float cloudAltitudeRange = 2600f;
+
+        [Tooltip("Оттенок рассеивания света внутри дождевых облаков.")]
+        public Color cloudScatteringTint = new Color(0.42f, 0.52f, 0.68f, 1.0f);
+
+        [Tooltip("Влияние лунного света на подсветку краев облаков.")]
+        [Range(0f, 1f)] public float cloudSunLightDimmer = 0.90f;
+
+        [Tooltip("Влияние окружения на яркость нижней части облаков.")]
+        [Range(0f, 1f)] public float cloudAmbientProbeDimmer = 0.75f;
+
+        [Tooltip("Скорость ветра в небе (км/ч). Двигает облака и синхронизируется с наклоном дождя.")]
+        [Range(0f, 100f)] public float windSpeed = 24f;
+
+        [Tooltip("Направление ветра в градусах.")]
+        [Range(0f, 360f)] public float windOrientation = 35f;
+
+        [Header("3. Густой объемный туман (HDRP Fog + Volumetric Fog)")]
+        [Tooltip("Дистанция затухания тумана (Mean Free Path / Fog Attenuation Distance в метрах). Чем МЕНЬШЕ значение, тем ГУЩЕ туман! 15-30м — густой туман.")]
+        [Range(5f, 150f)] public float fogAttenuationDistance = 22f;
+
+        [Tooltip("Базовая высота плотного слоя тумана над землей (Base Height в метрах).")]
+        [Range(-20f, 100f)] public float fogBaseHeight = 8f;
+
+        [Tooltip("Максимальная высота, до которой поднимается туман (Maximum Height в метрах).")]
+        [Range(10f, 300f)] public float fogMaximumHeight = 65f;
+
+        [Tooltip("Максимальная дальность рендеринга тумана.")]
+        [Range(100f, 5000f)] public float maxFogDistance = 1200f;
+
+        [Tooltip("Альбедо объемного тумана (определяет цвет рассеивания лунного света в тумане).")]
+        public Color fogAlbedo = new Color(0.58f, 0.68f, 0.82f, 1.0f);
+
+        [Tooltip("Оттенок тумана вдалеке (Tint).")]
+        public Color fogTint = new Color(0.16f, 0.22f, 0.34f, 1.0f);
+
+        [Tooltip("Анизотропия рассеивания (0 — равномерно, 0.4-0.7 — выраженное свечение вокруг Луны и фонарей).")]
+        [Range(-0.5f, 0.95f)] public float fogAnisotropy = 0.55f;
+
+        [Tooltip("Многократное рассеивание света в густом тумане (Multiple Scattering Intensity — дает мягкое свечение).")]
+        [Range(0f, 1f)] public float fogMultipleScattering = 0.65f;
+
+        [Tooltip("Глубина буфера объемного тумана от камеры (Depth Extent в метрах). 48-96м дают высокую четкость лучей рядом с камерой.")]
+        [Range(16f, 256f)] public float volumetricFogDepthExtent = 64f;
+
+        [Header("4. Небольшой дождь (Particle System)")]
+        [Tooltip("Включить систему частиц дождя.")]
+        public bool enableRainParticles = true;
+
+        [Tooltip("Интенсивность дождя (количество капель в секунду). 300-550 — небольшой атмосферный дождь.")]
+        [Range(50f, 2500f)] public float rainEmissionRate = 450f;
+
+        [Tooltip("Скорость падения капель дождя (м/с).")]
+        [Range(5f, 35f)] public float rainFallSpeed = 16f;
+
+        [Tooltip("Размер капель дождя.")]
+        [Range(0.01f, 0.12f)] public float rainDropSize = 0.035f;
+
+        [Tooltip("Растяжение капель в полете (Length Scale).")]
+        [Range(2f, 20f)] public float rainStretchLength = 8.5f;
+
+        [Tooltip("Цвет и прозрачность капель дождя (освещаются лунным светом).")]
+        public Color rainColor = new Color(0.68f, 0.78f, 0.92f, 0.28f);
+
+        [Tooltip("Площадь области дождя вокруг камеры (в метрах).")]
+        [Range(15f, 80f)] public float rainAreaSize = 35f;
+
+        [Tooltip("Высота генерации дождя над камерой (в метрах).")]
+        [Range(8f, 40f)] public float rainSpawnHeight = 18f;
+
+        [Tooltip("Включить брызги/круги на земле при столкновении капель с коллайдерами.")]
+        public bool enableRainSplashes = true;
+
+        [Header("5. Постобработка (Exposure, Bloom, ACES, Color Grading, SSR)")]
+        [Tooltip("Фиксированная экспозиция камеры (Fixed Exposure). Меньше = ярче! Для неглубокой ночи оптимально 4.6 - 5.6.")]
+        [Range(2.0f, 9.0f)] public float fixedExposure = 5.1f;
+
+        [Tooltip("Дополнительная коррекция яркости (Post Exposure).")]
+        [Range(-2.0f, 2.0f)] public float postExposure = 0.25f;
+
+        [Tooltip("Интенсивность свечения (Bloom Intensity) для мягкого ореола Луны и бликов на мокрых поверхностях.")]
+        [Range(0f, 1f)] public float bloomIntensity = 0.28f;
+
+        [Tooltip("Порог срабатывания Bloom.")]
+        [Range(0f, 5f)] public float bloomThreshold = 0.85f;
+
+        [Tooltip("Рассеивание Bloom (Scatter).")]
+        [Range(0.1f, 0.95f)] public float bloomScatter = 0.68f;
+
+        [Tooltip("Контрастность изображения (Color Adjustments).")]
+        [Range(-50f, 50f)] public float contrast = 14f;
+
+        [Tooltip("Насыщенность цветов (Saturation). Слегка приглушенная насыщенность делает дождливую ночь кинематографичной.")]
+        [Range(-50f, 50f)] public float saturation = -12f;
+
+        [Tooltip("Цветовой фильтр постобработки (легкий холодный сине-бирюзовый оттенок ночи).")]
+        public Color colorFilter = new Color(0.86f, 0.92f, 1.0f, 1.0f);
+
+        [Tooltip("Баланс белого: температура (White Balance Temperature).")]
+        [Range(-50f, 50f)] public float whiteBalanceTemperature = -14f;
+
+        [Tooltip("Интенсивность виньетки по краям экрана.")]
+        [Range(0f, 0.6f)] public float vignetteIntensity = 0.26f;
+
+        [Tooltip("Легкая зернистость пленки (Film Grain) для устранения бандинга в густом ночном тумане.")]
+        [Range(0f, 1f)] public float filmGrainIntensity = 0.18f;
+
+        [Tooltip("Экранные отражения (SSR) для эффекта мокрых поверхностей под дождем.")]
+        public bool enableWetSSR = true;
+
+        [Tooltip("Интенсивность глобального затенения (SSAO).")]
+        [Range(0f, 2f)] public float ssaoIntensity = 1.1f;
+
+        /// <summary>
+        /// Заполняет настройки значениями выбранного пресета.
+        /// </summary>
+        public void ApplyPresetValues(AtmospherePresetType preset)
+        {
+            presetType = preset;
+            switch (preset)
+            {
+                case AtmospherePresetType.LightRainThickFogNight:
+                    // Основной запрос: небольшой дождь, густой туман, не глубокая ночь, красивая Луна и дождливое небо
+                    qualityTier = GraphicsQualityTier.High;
+                    moonElevation = 28f;
+                    moonAzimuth = 145f;
+                    moonIntensityLux = 3.2f;
+                    moonColorTemperature = 4800f;
+                    moonLightColor = new Color(0.72f, 0.85f, 1.0f, 1.0f);
+                    moonAngularDiameter = 2.8f;
+                    moonSurfaceTint = new Color(0.92f, 0.96f, 1.0f, 1.0f);
+                    moonFlareSize = 16.0f;
+                    moonFlareFalloff = 4.5f;
+                    moonFlareMultiplier = 0.65f;
+                    moonFlareTint = new Color(0.48f, 0.68f, 1.0f, 1.0f);
+                    moonVolumetricDimmer = 2.4f;
+                    useMoonPhaseReflection = false;
+
+                    skyAerosolDensity = 0.35f;
+                    skyZenithTint = new Color(0.10f, 0.16f, 0.28f, 1.0f);
+                    skyHorizonTint = new Color(0.18f, 0.25f, 0.36f, 1.0f);
+                    starfieldMultiplier = 0.35f;
+
+                    enableVolumetricClouds = true;
+                    cloudDensityMultiplier = 0.68f;
+                    cloudShapeFactor = 0.64f; // Просветы в облаках, чтобы Луна красиво просвечивала
+                    cloudShapeScale = 3.2f;
+                    cloudErosionFactor = 0.75f;
+                    cloudBottomAltitude = 1100f;
+                    cloudAltitudeRange = 2600f;
+                    cloudScatteringTint = new Color(0.42f, 0.52f, 0.68f, 1.0f);
+                    cloudSunLightDimmer = 0.90f;
+                    cloudAmbientProbeDimmer = 0.75f;
+                    windSpeed = 24f;
+                    windOrientation = 35f;
+
+                    fogAttenuationDistance = 22f; // Густой туман
+                    fogBaseHeight = 8f;
+                    fogMaximumHeight = 65f;
+                    maxFogDistance = 1200f;
+                    fogAlbedo = new Color(0.58f, 0.68f, 0.82f, 1.0f);
+                    fogTint = new Color(0.16f, 0.22f, 0.34f, 1.0f);
+                    fogAnisotropy = 0.55f;
+                    fogMultipleScattering = 0.65f;
+                    volumetricFogDepthExtent = 64f;
+
+                    enableRainParticles = true;
+                    rainEmissionRate = 450f; // Небольшой дождь
+                    rainFallSpeed = 16f;
+                    rainDropSize = 0.035f;
+                    rainStretchLength = 8.5f;
+                    rainColor = new Color(0.68f, 0.78f, 0.92f, 0.28f);
+                    rainAreaSize = 35f;
+                    rainSpawnHeight = 18f;
+                    enableRainSplashes = true;
+
+                    fixedExposure = 5.1f; // Не глубокая ночь (хорошая читаемость окружения)
+                    postExposure = 0.25f;
+                    bloomIntensity = 0.28f;
+                    bloomThreshold = 0.85f;
+                    bloomScatter = 0.68f;
+                    contrast = 14f;
+                    saturation = -12f;
+                    colorFilter = new Color(0.86f, 0.92f, 1.0f, 1.0f);
+                    whiteBalanceTemperature = -14f;
+                    vignetteIntensity = 0.26f;
+                    filmGrainIntensity = 0.18f;
+                    enableWetSSR = true;
+                    ssaoIntensity = 1.1f;
+                    break;
+
+                case AtmospherePresetType.HeavyMistGiantMoon:
+                    // Очень густой туман, крупная кинематографичная Луна, мелкая морось
+                    ApplyPresetValues(AtmospherePresetType.LightRainThickFogNight);
+                    presetType = AtmospherePresetType.HeavyMistGiantMoon;
+                    qualityTier = GraphicsQualityTier.Ultra;
+                    moonElevation = 22f;
+                    moonAngularDiameter = 3.8f;
+                    moonFlareSize = 24f;
+                    moonFlareMultiplier = 0.80f;
+                    moonVolumetricDimmer = 3.2f;
+                    cloudShapeFactor = 0.70f;
+                    fogAttenuationDistance = 14f; // Очень густой туман
+                    fogBaseHeight = 12f;
+                    fogMaximumHeight = 85f;
+                    fogMultipleScattering = 0.82f;
+                    rainEmissionRate = 240f; // Легкая морось
+                    rainFallSpeed = 12f;
+                    rainDropSize = 0.028f;
+                    fixedExposure = 4.9f;
+                    bloomIntensity = 0.35f;
+                    break;
+
+                case AtmospherePresetType.StormyOvercastNight:
+                    // Более плотное дождливое небо, сильный ветер, выраженный дождь
+                    ApplyPresetValues(AtmospherePresetType.LightRainThickFogNight);
+                    presetType = AtmospherePresetType.StormyOvercastNight;
+                    qualityTier = GraphicsQualityTier.High;
+                    moonElevation = 34f;
+                    moonIntensityLux = 2.6f;
+                    cloudDensityMultiplier = 0.82f;
+                    cloudShapeFactor = 0.56f;
+                    cloudBottomAltitude = 900f;
+                    windSpeed = 48f;
+                    fogAttenuationDistance = 28f;
+                    rainEmissionRate = 950f;
+                    rainFallSpeed = 22f;
+                    rainStretchLength = 11f;
+                    fixedExposure = 5.3f;
+                    contrast = 18f;
+                    saturation = -18f;
+                    break;
+
+                case AtmospherePresetType.PerformanceNight:
+                    // Оптимизированный пресет для средних/слабых ПК с сохранением атмосферы
+                    ApplyPresetValues(AtmospherePresetType.LightRainThickFogNight);
+                    presetType = AtmospherePresetType.PerformanceNight;
+                    qualityTier = GraphicsQualityTier.Low;
+                    rainEmissionRate = 300f;
+                    enableRainSplashes = false;
+                    enableWetSSR = false;
+                    volumetricFogDepthExtent = 48f;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// ScriptableObject для сохранения пользовательских пресетов в проекте (Assets).
+    /// </summary>
+    [CreateAssetMenu(fileName = "HDRPRainyNightPreset", menuName = "HDRP Atmosphere/Rainy Night Preset", order = 100)]
+    public class HDRPRainyNightPresetAsset : ScriptableObject
+    {
+        public RainyNightSettings settings = new RainyNightSettings();
+    }
+
+    /// <summary>
+    /// Компонент, удерживающий бокс дождя над активной камерой (в игре и в окне Scene View).
+    /// </summary>
+    [ExecuteAlways]
+    public class HDRPRainFollowCamera : MonoBehaviour
+    {
+        public float heightOffset = 18f;
+        public bool followSceneViewInEditor = true;
+
+        private void LateUpdate()
+        {
+            Transform targetCam = null;
+
+            if (Application.isPlaying && Camera.main != null)
+            {
+                targetCam = Camera.main.transform;
+            }
+#if UNITY_EDITOR
+            else if (!Application.isPlaying && followSceneViewInEditor && SceneView.lastActiveSceneView != null && SceneView.lastActiveSceneView.camera != null)
+            {
+                targetCam = SceneView.lastActiveSceneView.camera.transform;
+            }
+#endif
+            if (targetCam == null && Camera.main != null)
+            {
+                targetCam = Camera.main.transform;
+            }
+
+            if (targetCam != null)
+            {
+                Vector3 pos = targetCam.position;
+                transform.position = new Vector3(pos.x, pos.y + heightOffset, pos.z);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Основной компонент-менеджер на сцене, который создает и обновляет Volume, Луну и Дождь.
+    /// Может управляться как через инспектор, так и из EditorWindow (Tools > HDRP Rainy Night Atmosphere Tool).
+    /// </summary>
+    [ExecuteAlways]
+    [DisallowMultipleComponent]
+    public class HDRPRainyNightController : MonoBehaviour
+    {
+        public RainyNightSettings settings = new RainyNightSettings();
+        public HDRPRainyNightPresetAsset activePresetAsset;
+
+        [Header("Ссылки на объекты сцены (заполняются автоматически)")]
+        public Volume globalVolume;
+        public Light moonLight;
+        public ParticleSystem rainParticleSystem;
+        public ParticleSystem splashParticleSystem;
+
+        [SerializeField, HideInInspector]
+        private Material m_RainMaterial;
+        [SerializeField, HideInInspector]
+        private Material m_SplashMaterial;
+
+        private void Reset()
+        {
+            settings.ApplyPresetValues(AtmospherePresetType.LightRainThickFogNight);
+            BuildOrUpdateAtmosphere();
+        }
+
+        private void OnValidate()
+        {
+            if (isActiveAndEnabled && globalVolume != null)
+            {
+                ApplySettingsToScene();
+            }
+        }
+
+        /// <summary>
+        /// Загружает выбранный встроенный пресет и сразу применяет его к сцене.
+        /// </summary>
+        public void ApplyPreset(AtmospherePresetType preset)
+        {
+            settings.ApplyPresetValues(preset);
+            BuildOrUpdateAtmosphere();
+        }
+
+        /// <summary>
+        /// Создает (если отсутствуют) и настраивает все объекты: Global Volume, Directional Light (Луна) и Particle System (Дождь).
+        /// </summary>
+        public void BuildOrUpdateAtmosphere()
+        {
+            EnsureVolumeExists();
+            EnsureMoonLightExists();
+            EnsureRainSystemExists();
+            ApplySettingsToScene();
+        }
+
+        private void EnsureVolumeExists()
+        {
+            if (globalVolume == null)
+            {
+                Transform existing = transform.Find("RainyNight_GlobalVolume");
+                if (existing != null)
+                    globalVolume = existing.GetComponent<Volume>();
+            }
+
+            if (globalVolume == null)
+            {
+                GameObject volGO = new GameObject("RainyNight_GlobalVolume");
+                volGO.transform.SetParent(transform, false);
+                globalVolume = volGO.AddComponent<Volume>();
+                globalVolume.isGlobal = true;
+                globalVolume.priority = 10f;
+            }
+
+            if (globalVolume.sharedProfile == null)
+            {
+                VolumeProfile profile = ScriptableObject.CreateInstance<VolumeProfile>();
+                profile.name = "RainyNight_HDRP_Profile";
+#if UNITY_EDITOR
+                if (!Application.isPlaying)
+                {
+                    string folderPath = "Assets/Settings";
+                    if (!AssetDatabase.IsValidFolder(folderPath))
+                    {
+                        AssetDatabase.CreateFolder("Assets", "Settings");
+                    }
+                    string assetPath = AssetDatabase.GenerateUniqueAssetPath(folderPath + "/RainyNight_HDRP_Profile.asset");
+                    AssetDatabase.CreateAsset(profile, assetPath);
+                    AssetDatabase.SaveAssets();
+                }
+#endif
+                globalVolume.sharedProfile = profile;
+            }
+        }
+
+        private void EnsureMoonLightExists()
+        {
+            if (moonLight == null)
+            {
+                Transform existing = transform.Find("Moon_DirectionalLight");
+                if (existing != null)
+                    moonLight = existing.GetComponent<Light>();
+            }
+
+            if (moonLight == null)
+            {
+                // Отключаем старые Directional Lights (например, дефолтное Солнце), чтобы они не перебивали ночь
+                Light[] allLights = FindObjectsByType<Light>(FindObjectsSortMode.None);
+                foreach (Light l in allLights)
+                {
+                    if (l != null && l.type == LightType.Directional && l.transform.parent != transform)
+                    {
+                        l.gameObject.SetActive(false);
+                    }
+                }
+
+                GameObject moonGO = new GameObject("Moon_DirectionalLight");
+                moonGO.transform.SetParent(transform, false);
+                moonLight = moonGO.AddComponent<Light>();
+                moonLight.type = LightType.Directional;
+            }
+
+            if (moonLight.GetComponent<HDAdditionalLightData>() == null)
+            {
+                moonLight.gameObject.AddComponent<HDAdditionalLightData>();
+            }
+        }
+
+        private void EnsureRainSystemExists()
+        {
+            if (!settings.enableRainParticles)
+            {
+                if (rainParticleSystem != null)
+                    rainParticleSystem.gameObject.SetActive(false);
+                return;
+            }
+
+            if (rainParticleSystem == null)
+            {
+                Transform existing = transform.Find("Rain_ParticleSystem");
+                if (existing != null)
+                    rainParticleSystem = existing.GetComponent<ParticleSystem>();
+            }
+
+            if (rainParticleSystem == null)
+            {
+                GameObject rainGO = new GameObject("Rain_ParticleSystem");
+                rainGO.transform.SetParent(transform, false);
+                rainParticleSystem = rainGO.AddComponent<ParticleSystem>();
+                rainGO.AddComponent<HDRPRainFollowCamera>();
+            }
+
+            rainParticleSystem.gameObject.SetActive(true);
+
+            if (splashParticleSystem == null)
+            {
+                Transform existingSplash = rainParticleSystem.transform.Find("RainSplashes_SubEmitter");
+                if (existingSplash != null)
+                    splashParticleSystem = existingSplash.GetComponent<ParticleSystem>();
+            }
+
+            if (splashParticleSystem == null)
+            {
+                GameObject splashGO = new GameObject("RainSplashes_SubEmitter");
+                splashGO.transform.SetParent(rainParticleSystem.transform, false);
+                splashParticleSystem = splashGO.AddComponent<ParticleSystem>();
+            }
+        }
+
+        /// <summary>
+        /// Применяет текущие параметры RainyNightSettings ко всем компонентам HDRP.
+        /// </summary>
+        public void ApplySettingsToScene()
+        {
+            if (globalVolume != null && globalVolume.sharedProfile != null)
+            {
+                ConfigureVolumeProfile(globalVolume.sharedProfile);
+            }
+
+            if (moonLight != null)
+            {
+                ConfigureMoonLight(moonLight);
+            }
+
+            if (settings.enableRainParticles)
+            {
+                EnsureRainSystemExists();
+                if (rainParticleSystem != null)
+                    ConfigureRainParticles(rainParticleSystem, splashParticleSystem);
+            }
+            else if (rainParticleSystem != null)
+            {
+                rainParticleSystem.gameObject.SetActive(false);
+            }
+
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                if (globalVolume != null && globalVolume.sharedProfile != null)
+                    EditorUtility.SetDirty(globalVolume.sharedProfile);
+                SceneView.RepaintAll();
+            }
+#endif
+        }
+
+        private static T GetOrAddOverride<T>(VolumeProfile profile) where T : VolumeComponent
+        {
+            if (!profile.TryGet<T>(out T component))
+            {
+                component = profile.Add<T>(true);
+            }
+            component.active = true;
+            return component;
+        }
+
+        private void ConfigureVolumeProfile(VolumeProfile profile)
+        {
+            // 1. Visual Environment (Physically Based Sky + Dynamic Ambient + Global Wind)
+            VisualEnvironment visualEnv = GetOrAddOverride<VisualEnvironment>(profile);
+            visualEnv.skyType.Override((int)SkyType.PhysicallyBased);
+            visualEnv.skyAmbientMode.Override(SkyAmbientMode.Dynamic);
+            visualEnv.windSpeed.Override(settings.windSpeed);
+            visualEnv.windOrientation.Override(settings.windOrientation);
+
+            // 2. Physically Based Sky (Атмосфера ночи, аэрозольная дымка, звездное небо)
+            PhysicallyBasedSky pbs = GetOrAddOverride<PhysicallyBasedSky>(profile);
+            pbs.type.Override(PhysicallyBasedSkyModel.EarthAdvanced);
+            pbs.atmosphericScattering.Override(true);
+            pbs.aerosolDensity.Override(settings.skyAerosolDensity);
+            pbs.aerosolTint.Override(new Color(0.75f, 0.82f, 0.95f));
+            pbs.aerosolAnisotropy.Override(0.45f);
+            pbs.aerosolMaximumAltitude.Override(2200f);
+            pbs.zenithTint.Override(settings.skyZenithTint);
+            pbs.horizonTint.Override(settings.skyHorizonTint);
+            pbs.horizonZenithShift.Override(0.15f);
+            pbs.colorSaturation.Override(0.90f);
+            pbs.spaceEmissionMultiplier.Override(settings.starfieldMultiplier);
+
+            // 3. Volumetric Clouds (Дождливое облачное небо с просветами для Луны)
+            VolumetricClouds clouds = GetOrAddOverride<VolumetricClouds>(profile);
+            clouds.enable.Override(settings.enableVolumetricClouds);
+            clouds.localClouds.Override(false);
+            clouds.cloudControl.Override(VolumetricClouds.CloudControl.Simple);
+            clouds.cloudPreset = VolumetricClouds.CloudPresets.Custom;
+
+            clouds.bottomAltitude.Override(settings.cloudBottomAltitude);
+            clouds.altitudeRange.Override(settings.cloudAltitudeRange);
+            clouds.densityMultiplier.Override(settings.cloudDensityMultiplier);
+            clouds.shapeFactor.Override(settings.cloudShapeFactor);
+            clouds.shapeScale.Override(settings.cloudShapeScale);
+            clouds.erosionFactor.Override(settings.cloudErosionFactor);
+            clouds.erosionScale.Override(85f);
+            clouds.erosionNoiseType.Override(VolumetricClouds.CloudErosionNoise.Perlin32);
+            clouds.scatteringTint.Override(settings.cloudScatteringTint);
+            clouds.powderEffectIntensity.Override(0.45f);
+            clouds.multiScattering.Override(0.55f);
+            clouds.sunLightDimmer.Override(settings.cloudSunLightDimmer);
+            clouds.ambientLightProbeDimmer.Override(settings.cloudAmbientProbeDimmer);
+            clouds.shadows.Override(true);
+            clouds.shadowOpacity.Override(0.45f);
+            clouds.temporalAccumulationFactor.Override(0.85f);
+            clouds.ghostingReduction.Override(true);
+
+            // Настройка шагов трассировки облаков в зависимости от выбранного качества
+            switch (settings.qualityTier)
+            {
+                case GraphicsQualityTier.Low:
+                    clouds.numPrimarySteps.Override(32);
+                    clouds.numLightSteps.Override(4);
+                    break;
+                case GraphicsQualityTier.Medium:
+                    clouds.numPrimarySteps.Override(48);
+                    clouds.numLightSteps.Override(6);
+                    break;
+                case GraphicsQualityTier.High:
+                    clouds.numPrimarySteps.Override(64);
+                    clouds.numLightSteps.Override(8);
+                    break;
+                case GraphicsQualityTier.Ultra:
+                    clouds.numPrimarySteps.Override(96);
+                    clouds.numLightSteps.Override(12);
+                    break;
+            }
+
+            // 4. Густой объемный туман (Fog + Volumetric Fog)
+            Fog fog = GetOrAddOverride<Fog>(profile);
+            fog.enabled.Override(true);
+            fog.enableVolumetricFog.Override(true);
+            fog.colorMode.Override(FogColorMode.SkyColor);
+            fog.tint.Override(settings.fogTint);
+            fog.albedo.Override(settings.fogAlbedo);
+            fog.meanFreePath.Override(settings.fogAttenuationDistance);
+            fog.baseHeight.Override(settings.fogBaseHeight);
+            fog.maximumHeight.Override(settings.fogMaximumHeight);
+            fog.maxFogDistance.Override(settings.maxFogDistance);
+            fog.anisotropy.Override(settings.fogAnisotropy);
+            fog.depthExtent.Override(settings.volumetricFogDepthExtent);
+            fog.globalLightProbeDimmer.Override(0.85f);
+            fog.multipleScatteringIntensity.Override(settings.fogMultipleScattering);
+            fog.denoisingMode.Override(FogDenoisingMode.Both);
+
+            fog.fogControlMode = FogControl.Balance;
+            switch (settings.qualityTier)
+            {
+                case GraphicsQualityTier.Low:
+                    fog.volumetricFogBudget = 0.25f;
+                    break;
+                case GraphicsQualityTier.Medium:
+                    fog.volumetricFogBudget = 0.50f;
+                    break;
+                case GraphicsQualityTier.High:
+                    fog.volumetricFogBudget = 0.75f;
+                    break;
+                case GraphicsQualityTier.Ultra:
+                    fog.volumetricFogBudget = 0.95f;
+                    break;
+            }
+
+            // 5. Exposure (Фиксированная экспозиция для 'не глубокой ночи')
+            Exposure exposure = GetOrAddOverride<Exposure>(profile);
+            exposure.mode.Override(ExposureMode.Fixed);
+            exposure.fixedExposure.Override(settings.fixedExposure);
+            exposure.compensation.Override(0f);
+
+            // 6. Indirect Lighting Controller (поддержка видимости в тенях ночью)
+            IndirectLightingController indirect = GetOrAddOverride<IndirectLightingController>(profile);
+            indirect.indirectDiffuseLightingMultiplier.Override(1.35f);
+            indirect.reflectionLightingMultiplier.Override(1.15f);
+
+            // 7. Bloom (мягкое свечение Луны и мокрых бликов)
+            Bloom bloom = GetOrAddOverride<Bloom>(profile);
+            bloom.intensity.Override(settings.bloomIntensity);
+            bloom.threshold.Override(settings.bloomThreshold);
+            bloom.scatter.Override(settings.bloomScatter);
+            bloom.tint.Override(new Color(0.80f, 0.88f, 1.0f));
+            bloom.highQualityFiltering = settings.qualityTier >= GraphicsQualityTier.High;
+
+            // 8. Tonemapping (ACES для глубокого кино-контраста)
+            Tonemapping tonemapping = GetOrAddOverride<Tonemapping>(profile);
+            tonemapping.mode.Override(TonemappingMode.ACES);
+            tonemapping.useFullACES.Override(true);
+
+            // 9. Color Adjustments & White Balance
+            ColorAdjustments colorAdj = GetOrAddOverride<ColorAdjustments>(profile);
+            colorAdj.postExposure.Override(settings.postExposure);
+            colorAdj.contrast.Override(settings.contrast);
+            colorAdj.saturation.Override(settings.saturation);
+            colorAdj.colorFilter.Override(settings.colorFilter);
+
+            WhiteBalance wb = GetOrAddOverride<WhiteBalance>(profile);
+            wb.temperature.Override(settings.whiteBalanceTemperature);
+            wb.tint.Override(2f);
+
+            // 10. Shadows, Midtones, Highlights (холодные синие тени, серебристые блики)
+            ShadowsMidtonesHighlights smh = GetOrAddOverride<ShadowsMidtonesHighlights>(profile);
+            smh.shadows.Override(new Vector4(0.92f, 0.96f, 1.06f, 0.0f));
+            smh.midtones.Override(new Vector4(0.96f, 0.98f, 1.03f, 0.0f));
+            smh.highlights.Override(new Vector4(1.0f, 1.02f, 1.08f, 0.0f));
+
+            // 11. Vignette & Film Grain
+            Vignette vignette = GetOrAddOverride<Vignette>(profile);
+            vignette.mode.Override(VignetteMode.Procedural);
+            vignette.intensity.Override(settings.vignetteIntensity);
+            vignette.smoothness.Override(0.45f);
+            vignette.color.Override(new Color(0.02f, 0.04f, 0.08f));
+
+            FilmGrain grain = GetOrAddOverride<FilmGrain>(profile);
+            grain.type.Override(FilmGrainLookup.Thin1);
+            grain.intensity.Override(settings.filmGrainIntensity);
+            grain.response.Override(0.8f);
+
+            // 12. Screen Space Reflection (мокрый асфальт/земля под дождем) & SSAO
+            ScreenSpaceReflection ssr = GetOrAddOverride<ScreenSpaceReflection>(profile);
+            ssr.enabled.Override(settings.enableWetSSR);
+            ssr.enabledTransparent.Override(settings.enableWetSSR);
+            ssr.usedAlgorithm.Override(ScreenSpaceReflectionAlgorithm.PBRAccumulation);
+            ssr.minSmoothness = 0.25f;
+
+            ScreenSpaceAmbientOcclusion ssao = GetOrAddOverride<ScreenSpaceAmbientOcclusion>(profile);
+            ssao.intensity.Override(settings.ssaoIntensity);
+            ssao.radius.Override(1.2f);
+            ssao.directLightingStrength.Override(0.4f);
+
+            // 13. Screen Space Lens Flare (тонкие атмосферные блики от Луны)
+            ScreenSpaceLensFlare lensFlare = GetOrAddOverride<ScreenSpaceLensFlare>(profile);
+            lensFlare.intensity.Override(settings.qualityTier >= GraphicsQualityTier.Medium ? 0.18f : 0f);
+            lensFlare.firstFlareIntensity.Override(0.4f);
+            lensFlare.secondaryFlareIntensity.Override(0.2f);
+            lensFlare.streaksIntensity.Override(0.25f);
+            lensFlare.tintColor.Override(new Color(0.55f, 0.75f, 1.0f));
+        }
+
+        private void ConfigureMoonLight(Light lightComp)
+        {
+            // Поворот Луны: X = высота над горизонтом (moonElevation), Y = азимут (moonAzimuth)
+            lightComp.transform.rotation = Quaternion.Euler(settings.moonElevation, settings.moonAzimuth, 0f);
+
+            // В Unity 6 (HDRP 17.x) единицы света и интенсивность задаются напрямую на компоненте Light
+            lightComp.type = LightType.Directional;
+            lightComp.lightUnit = LightUnit.Lux;
+            lightComp.intensity = settings.moonIntensityLux;
+            lightComp.useColorTemperature = true;
+            lightComp.colorTemperature = settings.moonColorTemperature;
+            lightComp.color = settings.moonLightColor;
+            lightComp.shadows = LightShadows.Soft;
+
+            HDAdditionalLightData hdLight = lightComp.GetComponent<HDAdditionalLightData>();
+            if (hdLight == null)
+                hdLight = lightComp.gameObject.AddComponent<HDAdditionalLightData>();
+
+            hdLight.EnableColorTemperature(true);
+            hdLight.EnableShadows(true);
+            hdLight.interactsWithSky = true;
+
+            // Настройка красивого диска Луны и ореола (Celestial Body)
+            hdLight.angularDiameter = settings.moonAngularDiameter;
+            hdLight.surfaceTint = settings.moonSurfaceTint;
+            hdLight.flareSize = settings.moonFlareSize;
+            hdLight.flareFalloff = settings.moonFlareFalloff;
+            hdLight.flareMultiplier = settings.moonFlareMultiplier;
+            hdLight.flareTint = settings.moonFlareTint;
+
+            if (settings.useMoonPhaseReflection)
+            {
+                hdLight.celestialBodyShadingSource = HDAdditionalLightData.CelestialBodyShadingSource.ReflectSunLight;
+                hdLight.moonPhase = settings.moonPhase;
+                hdLight.earthshine = settings.moonEarthshine;
+            }
+            else
+            {
+                hdLight.celestialBodyShadingSource = HDAdditionalLightData.CelestialBodyShadingSource.Emission;
+            }
+
+            // Волюметрики и мягкие тени от Луны
+            hdLight.affectsVolumetric = true;
+            hdLight.volumetricDimmer = settings.moonVolumetricDimmer;
+            hdLight.shadowDimmer = 0.88f;
+            hdLight.volumetricShadowDimmer = 0.92f;
+            hdLight.shadowTint = new Color(0.06f, 0.10f, 0.20f);
+            hdLight.SetShadowResolutionLevel(settings.qualityTier >= GraphicsQualityTier.High ? 2 : 1);
+        }
+
+        private void ConfigureRainParticles(ParticleSystem rainPS, ParticleSystem splashPS)
+        {
+            HDRPRainFollowCamera follow = rainPS.GetComponent<HDRPRainFollowCamera>();
+            if (follow != null)
+            {
+                follow.heightOffset = settings.rainSpawnHeight;
+            }
+            else
+            {
+                rainPS.transform.localPosition = new Vector3(0f, settings.rainSpawnHeight, 0f);
+            }
+
+            // Основной модуль капель дождя
+            var main = rainPS.main;
+            main.loop = true;
+            main.playOnAwake = true;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = Mathf.CeilToInt(settings.rainEmissionRate * 3.5f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(1.6f, 2.2f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(settings.rainFallSpeed * 0.9f, settings.rainFallSpeed * 1.1f);
+            main.startSize = new ParticleSystem.MinMaxCurve(settings.rainDropSize * 0.8f, settings.rainDropSize * 1.2f);
+            main.startColor = settings.rainColor;
+            main.gravityModifier = 0.35f;
+
+            // Эмиссия (небольшой дождь)
+            var emission = rainPS.emission;
+            emission.enabled = true;
+            emission.rateOverTime = settings.rainEmissionRate;
+
+            // Форма генерации (бокс над камерой)
+            var shape = rainPS.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Box;
+            shape.scale = new Vector3(settings.rainAreaSize, 1.5f, settings.rainAreaSize);
+            shape.rotation = new Vector3(90f, 0f, 0f); // Направление вниз по оси Y
+
+            // Наклон капель по направлению ветра из настроек неба
+            var vel = rainPS.velocityOverLifetime;
+            vel.enabled = true;
+            vel.space = ParticleSystemSimulationSpace.World;
+            float windRad = settings.windOrientation * Mathf.Deg2Rad;
+            float windDrift = settings.windSpeed * 0.08f;
+            vel.x = Mathf.Cos(windRad) * windDrift;
+            vel.y = 0f;
+            vel.z = Mathf.Sin(windRad) * windDrift;
+
+            // Рендерер растянутых капель (Stretched Billboard)
+            var renderer = rainPS.GetComponent<ParticleSystemRenderer>();
+            renderer.renderMode = ParticleSystemRenderMode.Stretch;
+            renderer.velocityScale = 0.04f;
+            renderer.lengthScale = settings.rainStretchLength;
+            renderer.shadowCastingMode = ShadowCastingMode.Off;
+            renderer.receiveShadows = true;
+            renderer.sharedMaterial = GetOrCreateRainMaterial(false);
+
+            // Столкновения с землей и круги/брызги
+            var collision = rainPS.collision;
+            collision.enabled = settings.enableRainSplashes;
+            collision.type = ParticleSystemCollisionType.World;
+            collision.mode = ParticleSystemCollisionMode.Collision3D;
+            collision.dampen = 1.0f;
+            collision.bounce = 0.0f;
+            collision.lifetimeLoss = 1.0f;
+            collision.quality = settings.qualityTier >= GraphicsQualityTier.High
+                ? ParticleSystemCollisionQuality.High
+                : ParticleSystemCollisionQuality.Medium;
+
+            var subEmitters = rainPS.subEmitters;
+            subEmitters.enabled = settings.enableRainSplashes && splashPS != null;
+
+            if (splashPS != null)
+            {
+                splashPS.gameObject.SetActive(settings.enableRainSplashes);
+                if (settings.enableRainSplashes)
+                {
+                    ConfigureSplashSubEmitter(splashPS, subEmitters);
+                }
+            }
+
+            if (!rainPS.isPlaying)
+            {
+                rainPS.Play();
+            }
+        }
+
+        private void ConfigureSplashSubEmitter(ParticleSystem splashPS, ParticleSystem.SubEmittersModule parentSubEmitters)
+        {
+            var main = splashPS.main;
+            main.loop = false;
+            main.playOnAwake = false;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.15f, 0.30f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(0.0f, 0.2f);
+            main.startSize = new ParticleSystem.MinMaxCurve(0.08f, 0.18f);
+            Color splashCol = settings.rainColor;
+            splashCol.a = Mathf.Clamp01(settings.rainColor.a * 1.4f);
+            main.startColor = splashCol;
+
+            var emission = splashPS.emission;
+            emission.enabled = true;
+            emission.rateOverTime = 0f;
+            emission.SetBursts(new ParticleSystem.Burst[] { new ParticleSystem.Burst(0f, 1) });
+
+            var sizeOverLifetime = splashPS.sizeOverLifetime;
+            sizeOverLifetime.enabled = true;
+            sizeOverLifetime.size = new ParticleSystem.MinMaxCurve(1f, AnimationCurve.Linear(0f, 0.2f, 1f, 1.5f));
+
+            var splashRenderer = splashPS.GetComponent<ParticleSystemRenderer>();
+            splashRenderer.renderMode = ParticleSystemRenderMode.HorizontalBillboard;
+            splashRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            splashRenderer.sharedMaterial = GetOrCreateRainMaterial(true);
+
+            // Привязываем саб-эмиттер на событие Collision без дублирования
+            while (parentSubEmitters.subEmittersCount > 0)
+            {
+                parentSubEmitters.RemoveSubEmitter(0);
+            }
+            parentSubEmitters.AddSubEmitter(splashPS, ParticleSystemSubEmitterType.Collision, ParticleSystemSubEmitterProperties.InheritNothing);
+        }
+
+        private Material GetOrCreateRainMaterial(bool isSplash)
+        {
+            Material mat = isSplash ? m_SplashMaterial : m_RainMaterial;
+            if (mat != null)
+                return mat;
+
+            Shader hdrpShader = Shader.Find("HDRP/Unlit");
+            if (hdrpShader == null)
+                hdrpShader = Shader.Find("HDRP/Lit");
+            if (hdrpShader == null)
+                hdrpShader = Shader.Find("Particles/Standard Unlit");
+
+            mat = new Material(hdrpShader);
+            mat.name = isSplash ? "HDRP_RainSplash_Mat" : "HDRP_RainDrop_Mat";
+
+            // Настраиваем прозрачный режим HDRP Unlit/Lit через HDMaterial API (Unity 6 HDRP 17.x)
+            if (hdrpShader != null && hdrpShader.name.StartsWith("HDRP/"))
+            {
+                HDMaterial.SetSurfaceType(mat, true); // true = Transparent
+                HDMaterial.SetBlendMode(mat, BlendingMode.Additive);
+                mat.SetColor("_UnlitColor", Color.white);
+                mat.SetColor("_BaseColor", Color.white);
+                mat.SetFloat("_EnableFogOnTransparent", 1f);
+            }
+
+            // Генерируем мягкую процедурную текстуру капли/круга на воде, чтобы не требовать внешних текстур
+            mat.mainTexture = CreateProceduralRainTexture(isSplash);
+            if (mat.HasProperty("_UnlitColorMap"))
+                mat.SetTexture("_UnlitColorMap", mat.mainTexture);
+            if (mat.HasProperty("_BaseColorMap"))
+                mat.SetTexture("_BaseColorMap", mat.mainTexture);
+
+            if (isSplash)
+                m_SplashMaterial = mat;
+            else
+                m_RainMaterial = mat;
+
+            return mat;
+        }
+
+        private static Texture2D CreateProceduralRainTexture(bool isRing)
+        {
+            int size = 64;
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.name = isRing ? "ProceduralSplashRing" : "ProceduralRainDrop";
+            tex.wrapMode = TextureWrapMode.Clamp;
+
+            Vector2 center = new Vector2(size * 0.5f, size * 0.5f);
+            float maxRadius = size * 0.5f;
+
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dist = Vector2.Distance(new Vector2(x, y), center) / maxRadius;
+                    float alpha;
+                    if (isRing)
+                    {
+                        // Мягкое кольцо на воде от упавшей капли
+                        float ring = 1f - Mathf.Abs(dist - 0.65f) / 0.25f;
+                        alpha = Mathf.Clamp01(ring) * (1f - Mathf.Clamp01(dist));
+                    }
+                    else
+                    {
+                        // Мягкий градиент для капли дождя
+                        alpha = Mathf.Pow(Mathf.Clamp01(1f - dist), 2.2f);
+                    }
+                    tex.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+            tex.Apply();
+            return tex;
+        }
+    }
+
+#if UNITY_EDITOR
+    /// <summary>
+    /// Кастомный инспектор для компонента HDRPRainyNightController на сцене.
+    /// </summary>
+    [CustomEditor(typeof(HDRPRainyNightController))]
+    public class HDRPRainyNightControllerEditor : Editor
+    {
+        public override void OnInspectorGUI()
+        {
+            HDRPRainyNightController ctrl = (HDRPRainyNightController)target;
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox(
+                "Unity 6.6 LTS HDRP — Контроллер ночного дождя, густого тумана и Луны.\n" +
+                "Вы также можете открыть удобное окно инструмента: Tools > HDRP Rainy Night Atmosphere Tool.",
+                MessageType.Info);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Неглубокая ночь + Дождь (База)", GUILayout.Height(26)))
+            {
+                Undo.RecordObject(ctrl, "Apply Rainy Night Preset");
+                ctrl.ApplyPreset(AtmospherePresetType.LightRainThickFogNight);
+            }
+            if (GUILayout.Button("Густой туман + Крупная Луна", GUILayout.Height(26)))
+            {
+                Undo.RecordObject(ctrl, "Apply Heavy Mist Preset");
+                ctrl.ApplyPreset(AtmospherePresetType.HeavyMistGiantMoon);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Штормовая пасмурная ночь", GUILayout.Height(26)))
+            {
+                Undo.RecordObject(ctrl, "Apply Stormy Night Preset");
+                ctrl.ApplyPreset(AtmospherePresetType.StormyOvercastNight);
+            }
+            if (GUILayout.Button("Оптимизированный (High FPS)", GUILayout.Height(26)))
+            {
+                Undo.RecordObject(ctrl, "Apply Performance Preset");
+                ctrl.ApplyPreset(AtmospherePresetType.PerformanceNight);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(6);
+            if (GUILayout.Button("Создать / Обновить графику на сцене", GUILayout.Height(32)))
+            {
+                Undo.RecordObject(ctrl, "Build Or Update HDRP Atmosphere");
+                ctrl.BuildOrUpdateAtmosphere();
+            }
+
+            EditorGUILayout.Space(6);
+            DrawDefaultInspector();
+        }
+    }
+
+    /// <summary>
+    /// Полноценное окно инструмента (EditorWindow) в верхнем меню Unity:
+    /// Tools > HDRP Rainy Night Atmosphere Tool
+    /// Позволяет в 1 клик создать сцену, переключать пресеты графики и тонко настраивать все параметры.
+    /// </summary>
+    public class HDRPRainyNightEditorWindow : EditorWindow
+    {
+        private HDRPRainyNightController m_Controller;
+        private Vector2 m_ScrollPos;
+        private bool m_FoldoutMoon = true;
+        private bool m_FoldoutSky = true;
+        private bool m_FoldoutFog = true;
+        private bool m_FoldoutRain = true;
+        private bool m_FoldoutPost = true;
+
+        [MenuItem("Tools/HDRP Rainy Night Atmosphere Tool", false, 100)]
+        public static void ShowWindow()
+        {
+            HDRPRainyNightEditorWindow window = GetWindow<HDRPRainyNightEditorWindow>("HDRP Rainy Night Tool");
+            window.minSize = new Vector2(440f, 640f);
+            window.Show();
+        }
+
+        private void OnFocus()
+        {
+            FindControllerInScene();
+        }
+
+        private void FindControllerInScene()
+        {
+            if (m_Controller == null)
+            {
+                m_Controller = FindFirstObjectByType<HDRPRainyNightController>();
+            }
+        }
+
+        private void OnGUI()
+        {
+            FindControllerInScene();
+
+            EditorGUILayout.Space(6);
+            GUIStyle titleStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.MiddleCenter
+            };
+            EditorGUILayout.LabelField("Unity 6.6 LTS HDRP — Ночной дождь, туман и Луна", titleStyle);
+            EditorGUILayout.Space(4);
+
+            // Проверка наличия контроллера на сцене
+            if (m_Controller == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "На текущей сцене еще не создан контроллер атмосферы.\n" +
+                    "Нажмите кнопку ниже, чтобы автоматически создать Global Volume (Небо, Облака, Густой туман, Постобработка), Луну и систему частиц дождя.",
+                    MessageType.Warning);
+
+                if (GUILayout.Button("Создать атмосферу на сцене (One-Click Setup)", GUILayout.Height(40)))
+                {
+                    CreateControllerInScene();
+                }
+                return;
+            }
+
+            RainyNightSettings s = m_Controller.settings;
+            EditorGUI.BeginChangeCheck();
+
+            // Панель быстрых пресетов
+            EditorGUILayout.BeginVertical("box");
+            EditorGUILayout.LabelField("Быстрые пресеты графики и атмосферы", EditorStyles.boldLabel);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Базовый: Ночь, Туман, Дождь, Луна", GUILayout.Height(28)))
+            {
+                Undo.RecordObject(m_Controller, "Preset: Light Rain Thick Fog Night");
+                m_Controller.ApplyPreset(AtmospherePresetType.LightRainThickFogNight);
+            }
+            if (GUILayout.Button("Густой туман и Крупная Луна", GUILayout.Height(28)))
+            {
+                Undo.RecordObject(m_Controller, "Preset: Heavy Mist Giant Moon");
+                m_Controller.ApplyPreset(AtmospherePresetType.HeavyMistGiantMoon);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Пасмурный ночной ливень", GUILayout.Height(28)))
+            {
+                Undo.RecordObject(m_Controller, "Preset: Stormy Overcast Night");
+                m_Controller.ApplyPreset(AtmospherePresetType.StormyOvercastNight);
+            }
+            if (GUILayout.Button("Оптимизированный (High FPS)", GUILayout.Height(28)))
+            {
+                Undo.RecordObject(m_Controller, "Preset: Performance Night");
+                m_Controller.ApplyPreset(AtmospherePresetType.PerformanceNight);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(4);
+            s.qualityTier = (GraphicsQualityTier)EditorGUILayout.EnumPopup("Уровень качества HDRP", s.qualityTier);
+            EditorGUILayout.EndVertical();
+
+            // Работа с ассетами пресетов (ScriptableObject)
+            EditorGUILayout.BeginVertical("box");
+            EditorGUILayout.BeginHorizontal();
+            m_Controller.activePresetAsset = (HDRPRainyNightPresetAsset)EditorGUILayout.ObjectField(
+                "Файл пресета (.asset)", m_Controller.activePresetAsset, typeof(HDRPRainyNightPresetAsset), false);
+
+            if (GUILayout.Button("Загрузить", GUILayout.Width(80)) && m_Controller.activePresetAsset != null)
+            {
+                Undo.RecordObject(m_Controller, "Load Preset Asset");
+                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(m_Controller.activePresetAsset.settings), m_Controller.settings);
+                m_Controller.ApplySettingsToScene();
+            }
+            if (GUILayout.Button("Сохранить как...", GUILayout.Width(110)))
+            {
+                SaveCurrentSettingsAsAsset(s);
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+
+            // Скролл-область с детальными настройками
+            m_ScrollPos = EditorGUILayout.BeginScrollView(m_ScrollPos);
+
+            // 1. Ночь и Луна
+            m_FoldoutMoon = EditorGUILayout.BeginFoldoutHeaderGroup(m_FoldoutMoon, "1. Ночь и Луна (Directional Light & Celestial Body)");
+            if (m_FoldoutMoon)
+            {
+                EditorGUILayout.BeginVertical("box");
+                s.moonElevation = EditorGUILayout.Slider("Высота Луны (°)", s.moonElevation, 5f, 85f);
+                s.moonAzimuth = EditorGUILayout.Slider("Азимут Луны (°)", s.moonAzimuth, 0f, 360f);
+                s.moonIntensityLux = EditorGUILayout.Slider("Яркость света (Lux)", s.moonIntensityLux, 0.2f, 12f);
+                s.moonColorTemperature = EditorGUILayout.Slider("Температура света (K)", s.moonColorTemperature, 3000f, 9000f);
+                s.moonLightColor = EditorGUILayout.ColorField("Оттенок света Луны", s.moonLightColor);
+                EditorGUILayout.Space(3);
+                s.moonAngularDiameter = EditorGUILayout.Slider("Размер диска Луны (°)", s.moonAngularDiameter, 0.5f, 8.0f);
+                s.moonSurfaceTint = EditorGUILayout.ColorField("Цвет диска Луны", s.moonSurfaceTint);
+                s.moonFlareSize = EditorGUILayout.Slider("Размер ореола (Flare Size)", s.moonFlareSize, 0f, 45f);
+                s.moonFlareFalloff = EditorGUILayout.Slider("Затухание ореола", s.moonFlareFalloff, 1f, 30f);
+                s.moonFlareMultiplier = EditorGUILayout.Slider("Яркость ореола", s.moonFlareMultiplier, 0f, 1f);
+                s.moonFlareTint = EditorGUILayout.ColorField("Цвет ореола Луны", s.moonFlareTint);
+                s.moonVolumetricDimmer = EditorGUILayout.Slider("Объемный свет Луны в тумане", s.moonVolumetricDimmer, 0f, 8f);
+                s.useMoonPhaseReflection = EditorGUILayout.Toggle("Режим фазы Луны (Reflect)", s.useMoonPhaseReflection);
+                if (s.useMoonPhaseReflection)
+                {
+                    s.moonPhase = EditorGUILayout.Slider("Фаза Луны (1 = полная)", s.moonPhase, 0f, 1f);
+                    s.moonEarthshine = EditorGUILayout.Slider("Пепельный свет (Earthshine)", s.moonEarthshine, 0f, 1f);
+                }
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            // 2. Дождливое небо и облака
+            m_FoldoutSky = EditorGUILayout.BeginFoldoutHeaderGroup(m_FoldoutSky, "2. Дождливое небо и Облака (Physically Based Sky & Clouds)");
+            if (m_FoldoutSky)
+            {
+                EditorGUILayout.BeginVertical("box");
+                s.skyAerosolDensity = EditorGUILayout.Slider("Атмосферная дымка (Aerosols)", s.skyAerosolDensity, 0f, 1f);
+                s.skyZenithTint = EditorGUILayout.ColorField("Цвет зенита ночи", s.skyZenithTint);
+                s.skyHorizonTint = EditorGUILayout.ColorField("Цвет горизонта ночи", s.skyHorizonTint);
+                s.starfieldMultiplier = EditorGUILayout.Slider("Яркость звезд в просветах", s.starfieldMultiplier, 0f, 5f);
+                EditorGUILayout.Space(3);
+                s.enableVolumetricClouds = EditorGUILayout.Toggle("Объемные дождевые облака", s.enableVolumetricClouds);
+                if (s.enableVolumetricClouds)
+                {
+                    s.cloudDensityMultiplier = EditorGUILayout.Slider("Плотность облаков", s.cloudDensityMultiplier, 0f, 1f);
+                    s.cloudShapeFactor = EditorGUILayout.Slider("Просветы в тучах (Shape Factor)", s.cloudShapeFactor, 0f, 1f);
+                    s.cloudShapeScale = EditorGUILayout.Slider("Масштаб облаков", s.cloudShapeScale, 0.5f, 10f);
+                    s.cloudErosionFactor = EditorGUILayout.Slider("Детализация краев (Erosion)", s.cloudErosionFactor, 0f, 1f);
+                    s.cloudBottomAltitude = EditorGUILayout.Slider("Высота базы туч (м)", s.cloudBottomAltitude, 500f, 4000f);
+                    s.cloudAltitudeRange = EditorGUILayout.Slider("Толщина слоя туч (м)", s.cloudAltitudeRange, 500f, 8000f);
+                    s.cloudScatteringTint = EditorGUILayout.ColorField("Оттенок туч", s.cloudScatteringTint);
+                    s.cloudSunLightDimmer = EditorGUILayout.Slider("Подсветка туч Луной", s.cloudSunLightDimmer, 0f, 1f);
+                }
+                s.windSpeed = EditorGUILayout.Slider("Скорость ветра (км/ч)", s.windSpeed, 0f, 100f);
+                s.windOrientation = EditorGUILayout.Slider("Направление ветра (°)", s.windOrientation, 0f, 360f);
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            // 3. Густой туман
+            m_FoldoutFog = EditorGUILayout.BeginFoldoutHeaderGroup(m_FoldoutFog, "3. Густой объемный туман (HDRP Volumetric Fog)");
+            if (m_FoldoutFog)
+            {
+                EditorGUILayout.BeginVertical("box");
+                s.fogAttenuationDistance = EditorGUILayout.Slider("Дистанция видимости (меньше=гуще)", s.fogAttenuationDistance, 5f, 150f);
+                s.fogBaseHeight = EditorGUILayout.Slider("Базовая высота тумана (м)", s.fogBaseHeight, -20f, 100f);
+                s.fogMaximumHeight = EditorGUILayout.Slider("Верхняя граница тумана (м)", s.fogMaximumHeight, 10f, 300f);
+                s.maxFogDistance = EditorGUILayout.Slider("Дальность тумана (м)", s.maxFogDistance, 100f, 5000f);
+                s.fogAlbedo = EditorGUILayout.ColorField("Альбедо рассеивания (Albedo)", s.fogAlbedo);
+                s.fogTint = EditorGUILayout.ColorField("Цвет глубокого тумана (Tint)", s.fogTint);
+                s.fogAnisotropy = EditorGUILayout.Slider("Анизотропия (ореолы света)", s.fogAnisotropy, -0.5f, 0.95f);
+                s.fogMultipleScattering = EditorGUILayout.Slider("Мягкое рассеивание (Multi-Scatter)", s.fogMultipleScattering, 0f, 1f);
+                s.volumetricFogDepthExtent = EditorGUILayout.Slider("Глубина буфера волюметриков (м)", s.volumetricFogDepthExtent, 16f, 256f);
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            // 4. Небольшой дождь
+            m_FoldoutRain = EditorGUILayout.BeginFoldoutHeaderGroup(m_FoldoutRain, "4. Небольшой дождь (Particle System + Splashes)");
+            if (m_FoldoutRain)
+            {
+                EditorGUILayout.BeginVertical("box");
+                s.enableRainParticles = EditorGUILayout.Toggle("Включить дождь", s.enableRainParticles);
+                if (s.enableRainParticles)
+                {
+                    s.rainEmissionRate = EditorGUILayout.Slider("Интенсивность (капель/сек)", s.rainEmissionRate, 50f, 2500f);
+                    s.rainFallSpeed = EditorGUILayout.Slider("Скорость падения (м/с)", s.rainFallSpeed, 5f, 35f);
+                    s.rainDropSize = EditorGUILayout.Slider("Толщина капель", s.rainDropSize, 0.01f, 0.12f);
+                    s.rainStretchLength = EditorGUILayout.Slider("Длина шлейфа капли", s.rainStretchLength, 2f, 20f);
+                    s.rainColor = EditorGUILayout.ColorField("Цвет и прозрачность капель", s.rainColor);
+                    s.rainAreaSize = EditorGUILayout.Slider("Радиус области дождя (м)", s.rainAreaSize, 15f, 80f);
+                    s.rainSpawnHeight = EditorGUILayout.Slider("Высота спавна над камерой (м)", s.rainSpawnHeight, 8f, 40f);
+                    s.enableRainSplashes = EditorGUILayout.Toggle("Круги/брызги на земле", s.enableRainSplashes);
+                }
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            // 5. Постобработка
+            m_FoldoutPost = EditorGUILayout.BeginFoldoutHeaderGroup(m_FoldoutPost, "5. Постобработка (Exposure, Bloom, ACES, SSR)");
+            if (m_FoldoutPost)
+            {
+                EditorGUILayout.BeginVertical("box");
+                s.fixedExposure = EditorGUILayout.Slider("Экспозиция (меньше = светлее ночь)", s.fixedExposure, 2.0f, 9.0f);
+                s.postExposure = EditorGUILayout.Slider("Коррекция яркости (Post Exposure)", s.postExposure, -2.0f, 2.0f);
+                s.bloomIntensity = EditorGUILayout.Slider("Интенсивность свечения (Bloom)", s.bloomIntensity, 0f, 1f);
+                s.bloomThreshold = EditorGUILayout.Slider("Порог свечения (Threshold)", s.bloomThreshold, 0f, 5f);
+                s.bloomScatter = EditorGUILayout.Slider("Мягкость свечения (Scatter)", s.bloomScatter, 0.1f, 0.95f);
+                s.contrast = EditorGUILayout.Slider("Контрастность", s.contrast, -50f, 50f);
+                s.saturation = EditorGUILayout.Slider("Насыщенность", s.saturation, -50f, 50f);
+                s.colorFilter = EditorGUILayout.ColorField("Цветовой фильтр ночи", s.colorFilter);
+                s.whiteBalanceTemperature = EditorGUILayout.Slider("Холод/Тепло (White Balance)", s.whiteBalanceTemperature, -50f, 50f);
+                s.vignetteIntensity = EditorGUILayout.Slider("Виньетка", s.vignetteIntensity, 0f, 0.6f);
+                s.filmGrainIntensity = EditorGUILayout.Slider("Зернистость (Film Grain)", s.filmGrainIntensity, 0f, 1f);
+                s.enableWetSSR = EditorGUILayout.Toggle("Отражения на мокрой земле (SSR)", s.enableWetSSR);
+                s.ssaoIntensity = EditorGUILayout.Slider("Глубина затенения (SSAO)", s.ssaoIntensity, 0f, 2f);
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            EditorGUILayout.EndScrollView();
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(m_Controller, "Modify Rainy Night Settings");
+                m_Controller.ApplySettingsToScene();
+            }
+
+            EditorGUILayout.Space(6);
+            if (GUILayout.Button("Пересобрать / Обновить все компоненты сцены", GUILayout.Height(34)))
+            {
+                Undo.RecordObject(m_Controller, "Rebuild Rainy Night Scene");
+                m_Controller.BuildOrUpdateAtmosphere();
+            }
+            EditorGUILayout.Space(4);
+        }
+
+        private void CreateControllerInScene()
+        {
+            GameObject go = new GameObject("HDRP_RainyNight_Atmosphere");
+            Undo.RegisterCreatedObjectUndo(go, "Create HDRP Rainy Night Atmosphere");
+            m_Controller = go.AddComponent<HDRPRainyNightController>();
+            m_Controller.settings.ApplyPresetValues(AtmospherePresetType.LightRainThickFogNight);
+            m_Controller.BuildOrUpdateAtmosphere();
+            Selection.activeGameObject = go;
+        }
+
+        private void SaveCurrentSettingsAsAsset(RainyNightSettings currentSettings)
+        {
+            string path = EditorUtility.SaveFilePanelInProject(
+                "Сохранить пресет атмосферы HDRP",
+                "HDRPRainyNightPreset",
+                "asset",
+                "Выберите путь для сохранения пресета настроек");
+
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            HDRPRainyNightPresetAsset asset = ScriptableObject.CreateInstance<HDRPRainyNightPresetAsset>();
+            JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(currentSettings), asset.settings);
+            AssetDatabase.CreateAsset(asset, path);
+            AssetDatabase.SaveAssets();
+            m_Controller.activePresetAsset = asset;
+            EditorGUIUtility.PingObject(asset);
+        }
+    }
+#endif
+}
