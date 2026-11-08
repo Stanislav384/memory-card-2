@@ -534,7 +534,7 @@ namespace HDRPAtmosphereTools
             if (moonLight == null)
             {
                 // Отключаем старые Directional Lights (например, дефолтное Солнце), чтобы они не перебивали ночь
-                Light[] allLights = FindObjectsByType<Light>(FindObjectsSortMode.None);
+                Light[] allLights = FindObjectsByType<Light>();
                 foreach (Light l in allLights)
                 {
                     if (l != null && l.type == LightType.Directional && l.transform.parent != transform)
@@ -668,7 +668,6 @@ namespace HDRPAtmosphereTools
             // 3. Volumetric Clouds (Дождливое облачное небо с просветами для Луны)
             VolumetricClouds clouds = GetOrAddOverride<VolumetricClouds>(profile);
             clouds.enable.Override(settings.enableVolumetricClouds);
-            clouds.localClouds.Override(false);
             clouds.cloudControl.Override(VolumetricClouds.CloudControl.Simple);
             clouds.cloudPreset = VolumetricClouds.CloudPresets.Custom;
 
@@ -1008,10 +1007,15 @@ namespace HDRPAtmosphereTools
             if (hdrpShader != null && hdrpShader.name.StartsWith("HDRP/"))
             {
                 HDMaterial.SetSurfaceType(mat, true); // true = Transparent
-                HDMaterial.SetBlendMode(mat, BlendingMode.Additive);
-                mat.SetColor("_UnlitColor", Color.white);
-                mat.SetColor("_BaseColor", Color.white);
-                mat.SetFloat("_EnableFogOnTransparent", 1f);
+                if (mat.HasProperty("_BlendMode"))
+                    mat.SetFloat("_BlendMode", 1f); // 1 = Additive в шейдерах HDRP
+                if (mat.HasProperty("_UnlitColor"))
+                    mat.SetColor("_UnlitColor", Color.white);
+                if (mat.HasProperty("_BaseColor"))
+                    mat.SetColor("_BaseColor", Color.white);
+                if (mat.HasProperty("_EnableFogOnTransparent"))
+                    mat.SetFloat("_EnableFogOnTransparent", 1f);
+                HDMaterial.ValidateMaterial(mat);
             }
 
             // Генерируем мягкую процедурную текстуру капли/круга на воде, чтобы не требовать внешних текстур
@@ -1151,7 +1155,7 @@ namespace HDRPAtmosphereTools
         {
             if (m_Controller == null)
             {
-                m_Controller = FindFirstObjectByType<HDRPRainyNightController>();
+                m_Controller = FindAnyObjectByType<HDRPRainyNightController>();
             }
         }
 
